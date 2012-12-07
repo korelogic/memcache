@@ -1,0 +1,181 @@
+<?php
+
+	require_once TOOLKIT.'/class.sectionmanager.php';
+
+	Class Prime extends ShellCommand{
+	
+		public function usage(){
+			return "Primes Cache.\n";
+		}
+		
+		private function show_status($done, $total, $size=30) {
+
+		    static $start_time;
+		
+		    // if we go over our bound, just ignore it
+		    if($done > $total) return;
+		
+		    if(empty($start_time)) $start_time=time();
+		    $now = time();
+		
+		    $perc=(double)($done/$total);
+		
+		    $bar=floor($perc*$size);
+		
+		    $status_bar="\r[";
+		    $status_bar.=str_repeat("=", $bar);
+		    if($bar<$size){
+		        $status_bar.=">";
+		        $status_bar.=str_repeat(" ", $size-$bar);
+		    } else {
+		        $status_bar.="=";
+		    }
+		
+		    $disp=number_format($perc*100, 0);
+		
+		    $status_bar.="] $disp%  $done/$total";
+		
+		    $rate = ($now-$start_time)/$done;
+		    $left = $total - $done;
+		    $eta = round($rate * $left, 2);
+		
+		    $elapsed = $now - $start_time;
+		
+		    $status_bar.= " remaining: ".number_format($eta)." sec.  elapsed: ".number_format($elapsed)." sec.";
+		
+		    echo "$status_bar  ";
+		
+		    flush();
+		
+		    // when done, send a newline
+		    if($done == $total) {
+		        echo "\n";
+		    }
+		
+		}
+		
+		public function run(array $args=NULL){
+		
+			$cache_id = $args[0];
+			
+			print "Memcache Prime: " .$cache_id.  "\n";
+	
+			$servers = Shell::Database()->fetch('
+				SELECT
+					`id`,
+					`label`,
+					`server`,
+					`port`
+				FROM `sym_extensions_memcache_servers`
+				ORDER BY `label` ASC;'
+			);
+			
+			$memcache = new Memcache;
+			foreach($servers as $server) {
+				print "Memcache Server: " . $server["server"]. " ". $server["port"] . "\n";
+				$memcache->addServer($server["server"], $server["port"]);
+			}	
+			
+			$cachesSQL = "
+				SELECT
+					`id`,
+					`label`,
+					`section_id`,
+					`key_id`
+				FROM `sym_extensions_memcache` ";
+				
+				
+			if(isset($cache_id)){
+				$cachesSQL .= "WHERE`id` = ".(int) $cache_id ;
+			}
+			
+			$caches = Shell::Database()->fetch($cachesSQL);
+			
+			foreach($caches as $cache) {
+			
+				$cache_id = $cache["id"];
+			
+				$sections = reset(Shell::Database()->fetch("
+					SELECT *
+					FROM `tbl_sections`
+					WHERE `id` = ".(int) $cache["section_id"] .";"
+				));
+				
+				$fields = Shell::Database()->fetch("
+					SELECT *
+					FROM `sym_fields`
+					WHERE `parent_section` = ".(int) $cache["section_id"] .";"
+				);	
+						
+				$section_fields = array();
+	
+				//Build SQL
+				$primeSQL =  "SELECT ";
+				
+				$selects = array();
+				array_push($selects, "e.id AS id");
+				
+				foreach($fields as $key => $field) {
+					if(in_array($field["type"], array("input", "number", "checkbox", "select"))){
+						$joinKey = str_replace("-", "", $field['element_name']);
+						array_push($selects, $joinKey.".value AS ".$joinKey);
+						$section_fields[$joinKey] = $field;
+					}
+				}	
+				
+				$primeSQL .= implode(", ", $selects);	
+				$primeSQL .= " FROM sym_entries AS e ";
+				$cacheKey = "";	 
+				
+				foreach($section_fields as $field) {
+					if(in_array($field["type"], array("input", "number", "checkbox", "select"))){
+						$joinKey = str_replace("-", "", $field['element_name']);
+						$primeSQL .= "LEFT OUTER JOIN sym_entries_data_".$field['id']." AS ".$joinKey." ON (e.id = ".$joinKey.".entry_id) ";
+						if($field['id'] == $cache["key_id"]) $cacheKey = $joinKey;
+					}
+				}			 
+							 
+				$primeSQL .= "
+					WHERE 1
+					AND e.section_id = '". $cache["section_id"] ."';
+				";
+	
+				// Prime Cache
+				print "Fetching DB Records...\n";
+				$primeCache = Symphony::Database()->fetch($primeSQL);
+				
+				print "Priming Cache: ".$cache["label"]."...\n";
+				
+							
+				foreach($primeCache as $entry_id => $entry) {
+				
+					$xml_entry = new XMLElement('entry');
+					$xml_entry->setAttribute('id', $entry["id"]);
+					$xml_entry->setAttribute('sectionid', $cache["section_id"]);
+				
+					foreach ($entry as $field_id => $value) {
+						if($field_id != "id"){
+							$field = $section_fields[$field_id];
+							$handle = $field['element_name'];
+							$xml_field = new XMLElement($handle, $value);
+							$xml_entry->appendChild($xml_field);
+						}
+					}
+					
+					$key = $cache["label"]."_".$entry[$cacheKey];
+					$var = $xml_entry->generate();
+					
+					$result = $memcache->replace($key, $var); 
+					if( $result == false ){ 
+					    $memcache->set( $key, $var ); 
+					}
+					$this->show_status($entry_id+1, count($primeCache));
+				}
+				
+				Symphony::Database()->update(array('updated' => DateTimeObj::get('Y-m-d H:i:s')), 'sym_extensions_memcache', '`id` = '.(int) $cache_id);
+
+			}
+		}
+	}
+	
+	return 'Prime';

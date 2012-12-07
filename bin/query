@@ -1,0 +1,38 @@
+<?php
+
+	require_once TOOLKIT.'/class.sectionmanager.php';
+
+	Class Query extends ShellCommand {
+	
+		public function usage(){
+			return "run cache query.\n";
+		}
+
+		public function run(array $args=NULL){
+		
+			$key = $args[0];
+			//OBRates_44192641
+			
+			$servers = Shell::Database()->fetch('
+				SELECT
+					`id`,
+					`label`,
+					`server`,
+					`port`
+				FROM `sym_extensions_memcache_servers`
+				ORDER BY `label` ASC;'
+			);
+			
+			$memcache = new Memcache;
+			
+			foreach($servers as $server) {
+				print "Memcache Server: " . $server["server"]. " ". $server["port"] . "\n";
+				$memcache->addServer($server["server"], $server["port"]);
+			}
+			
+			print var_dump($memcache->get($key)); 
+			
+		}
+	}
+	
+	return 'Query';
